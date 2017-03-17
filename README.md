@@ -42,4 +42,4 @@ Company wants to automate the loan eligibility process (real time) based on cust
 
 ## Link to project
 
-[rpub](http://rpubs.com/jimmycy93/259572)
+[Loan Prediction](http://rpubs.com/jimmycy93/259572)
