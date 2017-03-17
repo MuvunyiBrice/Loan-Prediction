@@ -1,0 +1,413 @@
+---
+title: "<center>**Loan Prediction** </center>"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+---------------------------------------
+
+Even though this is an Analytics Vidhya competition, my goal in this project is not to compete or to construct the most accurate model but to demonstrate basic skills of tackling cleaned datasets that includes: handling missing values, exploratory analysis, feature engineering, building predictive model, tuning model parameters, and model evaluation, as well as gaining insights from data and model. The goal of this problem is to predict the status of loan approval of test data set as accurate as possible.
+
+Data Preprocessing
+---------------------------------------
+####Loading essential packages
+```{r}
+suppressMessages(library(ggplot2)) 
+suppressMessages(library(gridExtra))
+suppressMessages(library(dplyr)) 
+suppressMessages(library(mice)) 
+suppressMessages(library(randomForest))
+suppressMessages(library(rpart))
+suppressMessages(library(Hmisc))
+```
+
+####Reading data from csv
+
+```{r}
+setwd("C:/Users/Jimmy Chen/Desktop/Project")
+train<-read.csv("loantrain.csv")
+test<-read.csv("loantest.csv")
+```
+
+####First look at train data
+```{r,results='hide'}
+str(train)
+```
+####Data Cleaning
+```{r}
+#turn binary variable Credit_History into factor
+train$Credit_History<-factor(train$Credit_History,labels = c("N","Y"))
+test$Credit_History<-factor(test$Credit_History,labels = c("N","Y"))
+
+#convert factor variable Dependents into numeric
+levels(train$Dependents)[levels(train$Dependents)=="3+"] <- "3"
+train$Dependents<-as.integer(as.character(train$Dependents))
+levels(test$Dependents)[levels(test$Dependents)=="3+"] <- "3"
+test$Dependents<-as.integer(as.character(test$Dependents))
+
+#remove the id column 
+train<-train[-1]
+
+#some NA's are coded as empty strings
+train$Gender[train$Gender==""] <- NA
+train$Married[train$Married==""] <- NA
+train$Self_Employed[train$Self_Employed==""] <- NA
+test$Gender[test$Gender==""] <- NA
+test$Married[test$Married==""] <- NA
+test$Self_Employed[test$Self_Employed==""] <- NA
+
+train$Married<-droplevels(train$Married) #test data does not have the empty level as train data does
+```
+
+```{r}
+summary(train)
+```
+Some of the first thoughts from summary:
+
+  - There must be one or more extreme value of applicants' income
+  - More than 25% of the applicants do not have coaaplicant
+  - The applicants has trends toward male, graduate, or self-employed
+  - Most applicants' credit history meet the guidlines
+  - The response variable, loan status is not balanced with a ratio of about 2:1
+  - There are variables that have missing values in data
+  
+####Outliers detection
+```{r,echo=FALSE,fig.height=3,fig.width=5,warning=FALSE}
+#plot the numeric variables to check if there's extreme outliers
+ggplot(train,aes(x=Loan_Status,y=ApplicantIncome))+geom_boxplot() #ApplicantIncome
+ggplot(train,aes(x=Loan_Status,y=CoapplicantIncome))+geom_boxplot() #CoapplicantIncome
+ggplot(train,aes(x=Loan_Status,y=LoanAmount))+geom_boxplot() #LoanAmount
+#Values seem not too extreme
+```
+```{r,echo=FALSE,results='hide'}
+filter(train,ApplicantIncome>20000) 
+#There are serveral extreme points
+filter(train,CoapplicantIncome>20000)
+#There are serveral extreme points
+```
+
+  
+  Even though there are serveral extreme points, it seems not to be mistakenly inputed, therefore we are not going to remove them from the dataset. Moreover, the boxplots of numeric variables look similiar for different loan status, the distinction seems not strong looking from individual features. 
+  
+
+####Missing values treatment
+```{r,results='hide'}
+#create a new feature of the number of Na in an observation
+train_NAs<-NULL
+test_NAs<-NULL
+for(i in 1:nrow(train)) train_NAs[i]<-sum(is.na(train[i, ]))
+train$NA_number<-train_NAs
+for(i in 1:nrow(test)) test_NAs[i]<-sum(is.na(test[i, ]))
+test$NA_number<-test_NAs
+#the ratio of missing for each variable
+names<-names(train)
+missing<-data.frame(variable=names,missing_proportion=sapply(names,function(x) sum(is.na(train[x]))/nrow(train)))
+missing #The missing rate does not exceed 10%
+
+#input missing values by package mice, considering that the missing values are not MNAR(missing not at random)
+trainimp<-mice(data=train,m=5,maxit = 10,method="pmm",printFlag=FALSE,seed=0817) #estimate fitting values for continuous variables using predictive mean matching of mice
+newtrain<-complete(trainimp) #imput the estimated missing values
+sum(is.na(newtrain)) #all missing value are imputed
+
+testimp<-mice(data=test[-1],m=5,maxit = 10,method="pmm",printFlag=FALSE,seed=0817) 
+newtest<-complete(testimp) #imput the estimated missing values for test dataset as well
+```
+
+
+Exploratory Analysis
+---------------------------------------
+This section is an important part in the analysis. By plotting exploratory graphs, we gain better idea of the data. This section will be breaken into two parts, univariate visualization and variables against response. To avoid taking too much space, not all graphs done will be presented below.
+
+####Univariate visualization
+```{r,echo=FALSE,fig.height=5,fig.width=5}
+dep<-ggplot(newtrain,aes(Dependents))+geom_bar() #plot the distribution of Dependents
+term<-ggplot(newtrain,aes(as.factor(Loan_Amount_Term)))+geom_bar() #plot the distribution of Loan term
+
+income<-ggplot(newtrain,aes(ApplicantIncome))+geom_histogram(bins=10)
+coincome<-ggplot(newtrain,aes(CoapplicantIncome))+geom_histogram(bins=10)
+#plot the distribution of the incomes
+
+grid.arrange(dep,term,income,coincome,nrow =2) 
+```
+
+
+Some interesting discovery from above plots are :
+
+  - Most of the applicants do not have dependents
+  - The applicant income and coapplicant income has a similiar extremely left-skewed distribution
+  - 85% of the loan applied are 360 terms
+
+####Variables against response
+```{r,echo=FALSE,fig.height=5,fig.width=5}
+#Discrete variables
+plotfun<-function(colname){
+  newtrain%>%
+    group_by_(colname)%>%
+    summarise(Approved_rate=sum(Loan_Status=="Y")/n())%>%
+    ggplot(aes_string(x=colname,y="Approved_rate"))+geom_bar(stat = "identity")
+    #function to calculate and plot the approved rate by discrete variables
+}
+
+gender<-plotfun("Gender")
+married<-plotfun("Married")
+dependents<-plotfun("Dependents")
+employed<-plotfun("Self_Employed")
+
+grid.arrange(gender,married,dependents,employed,ncol =2,nrow=2) #approved rate of discrete variables that do not have significant effect on response directly
+```
+
+```{r,echo=FALSE,fig.height=3,fig.width=5}
+area<-plotfun("Property_Area")
+education<-plotfun("Education")
+
+grid.arrange(area,education,ncol =2) #approved rate of different area or education seems to have a larger variation
+
+plotfun("Credit_History") #This variable has a very significant variation
+
+```
+
+```{r,echo=FALSE,fig.height=5,fig.width=5}
+#numeric variables
+newtrain$term360<-ifelse(newtrain$Loan_Amount_Term=="360",1,0)
+#since most of the loan terms are 360, we bin all other terms together to see if there is significant difference
+term<-plotfun("term360")
+
+newtrain$status<-ifelse(newtrain$Loan_Status=="N",0,1) #make the response variable numeric to plot against continuos dependents
+
+plot_continuos<-function(data,colname){
+  ggplot(data,aes_string(x=colname,y="status"))+geom_point()+stat_smooth(method = "glm", method.args = list(family="binomial"),se=FALSE)
+}
+
+appincome<-plot_continuos(newtrain,"ApplicantIncome") 
+#binary fit line of loan status to applicant income
+
+coappincome<-newtrain%>%
+  filter(CoapplicantIncome<15000)%>%
+  plot_continuos("CoapplicantIncome")
+#binary fit line of loan status to coapplicant income, removing the 4 misleading outliers
+
+amount<-plot_continuos(newtrain,"LoanAmount") #binary fit line of loan status to loan amount
+
+grid.arrange(term,amount,appincome,coappincome,nrow=2,ncol=2)
+```
+
+Some interesting discovery from above plots and statical tests (t test and ANOVA ran in console) are :
+
+  - Features that are significant indivually include property area, education, loan amount, and lastly credit history, which is the strongest among all
+  
+  - Some variables such as applicant income and coapplicant income are not significant alone, which is strange since by intutition they should be important. Therefore, we will plot them together in the feature engineering section to see if there exists interaction that distinguishes the response well.
+
+
+Feature engeneering
+---------------------------------------
+This part is crucial to the analysis, since features should be combined or transformed someway in order to build a better model. Therefore, we will make serveral graphs below to determine which combination or transformation of variables can be added as new features.
+
+#####Adding up the two kind of income  
+```{r,echo=FALSE,fig.height=3,fig.width=5}
+newtrain$status<-ifelse(newtrain$Loan_Status=="N",0,1) #make the response variable numeric to plot against continuos dependents
+newtrain$Total_Income<-newtrain$ApplicantIncome+newtrain$CoapplicantIncome 
+
+totalfit<-newtrain%>%
+  filter(Total_Income<30000)%>%
+  plot_continuos("Total_Income") #binary fit line
+
+totalbox<-newtrain%>%
+  filter(Total_Income<30000)%>%
+  ggplot(aes(Loan_Status,Total_Income))+geom_boxplot() #boxplot
+
+grid.arrange(totalfit,totalbox,ncol=2) 
+
+```
+
+Adding up the total seems to be not significant by itself.
+
+#Dividing the loan amount by total income
+```{r,echo=FALSE,fig.height=3,fig.width=5}
+newtrain$Income_by_loan<-(newtrain$ApplicantIncome+newtrain$CoapplicantIncome)/newtrain$LoanAmount
+newtest$Income_by_loan<-(newtest$ApplicantIncome+newtest$CoapplicantIncome)/newtest$LoanAmount
+#add to test set
+
+plot_continuos(newtrain,"Income_by_loan") #binary fit line
+#it seems to be more significant, let's try again with outliers removed
+```
+
+```{r,echo=FALSE,fig.height=3,fig.width=5}
+quotientfit<-newtrain%>%
+  filter(Income_by_loan<200)%>%
+  plot_continuos("Income_by_loan")+ggtitle("Outliers removed") 
+
+quotientbox<-newtrain%>%
+  filter(Income_by_loan<200)%>%
+  ggplot(aes(Loan_Status,Income_by_loan))+geom_boxplot()+ggtitle("Outliers removed") #boxplot
+
+grid.arrange(quotientfit,quotientbox,ncol=2)
+```
+  
+  There seems to be a strong positive effect between total income/loan amount and approve rate, therefore it might be a good choice to add this variable as new feature.
+
+
+####Does it matter if there is no coapplicant?
+```{r,echo=FALSE,fig.height=3,fig.width=5}
+newtrain$Zero<-ifelse(newtrain$CoapplicantIncome==0,1,0)
+newtest$Zero<-ifelse(newtest$CoapplicantIncome==0,1,0)
+
+plotfun("Zero")+ggtitle("Zero=1 if there exist coapplicant") 
+t.test(newtrain$status~newtrain$Zero)
+
+```
+  
+  An applicant seems more likely to be approved if he/she has a coapplicant, therefore we will keep this variable
+
+####High total income but low applicant income?
+```{r,echo=FALSE,fig.height=3,fig.width=5}
+#What if the applicant that has low income reaches high total income mostly by help of coapplicant's high income? 
+newtrain$ApplicantIncome_by_loan<-newtrain$ApplicantIncome/newtrain$LoanAmount
+newtest$ApplicantIncome_by_loan<-newtest$ApplicantIncome/newtest$LoanAmount
+
+
+newtrain%>%
+  filter(ApplicantIncome_by_loan<200)%>%
+  plot_continuos("ApplicantIncome_by_loan")
+
+```
+  
+  We will add this variable, since sometimes total income by loan amount itself will left out applicants that have low income but high coapplicant income
+
+
+  New features added to the original data set are:
+  
+  - NA_number: The number of missing value each row before missing value imputation
+  
+  - Zero: A dummy variable of whether there is co-applicant or not
+  
+  - Income_by_loan: The sum of applicant and co-applicant income, then divided by loan amount
+  
+  - ApplicantIncome_by_loan: The sum of applicant income itself, dived by loan amount
+
+```{r}
+#remove unneeded variables
+newtrain$term360<-NULL
+newtrain$status<-NULL
+newtrain$Total_Income<-NULL
+```
+
+
+
+Model building and tuning
+---------------------------------------
+For this problem, we will use Random Forest as our prediction model, since it has the following advantages:
+
+  - It works very well in classification problem.
+  
+  - It is strong with outliers, irrelevant variables, and a mix of continuous and discrete variables.
+  
+  - It produces out of bag estimate error which has proven to be unbiased in many tests.
+  
+  - It is relatively easy to tune with.
+
+As for the evaluation method, we will choose "Accuracy" since the aim of this project is to correctly predict as many cases as possible. However, for others, "Accuracy" might not be a good evaluation method, for example, imbalanced data or cases that you care one of false negative or false positive signals a lot more than the other. 
+
+Finally, we will tune the two parameters below of the random forest model, since they are most likely to have the biggest effect on our final accuracy.
+
+  - mtry: Number of variables randomly sampled as candidates at each split.
+  
+  - ntree: Number of trees to grow.
+
+####Model without tuning
+```{r}
+set.seed(91)
+original_rf<-randomForest(Loan_Status~ .,newtrain[-c(13:16)])
+original_rf
+# base model without feature engineering has an OOB error rate of 19.06%
+feature_engineered_rf<-randomForest(Loan_Status~.,newtrain)
+feature_engineered_rf
+# base model with additional variables has a better OOB error rate 16.94% 
+```
+  
+  It is clear that model with feature learning has a better accuracy than the original one. Therefore, we will choose to use it as our base model and proceed to model tuning.
+  
+
+####Tuning Model
+```{r}
+set.seed(18)
+tune_grid<-expand.grid(mtry=c(1:10), ntree=c(500,1000,1500,2000)) #expand a grid of parameters
+mtry<-tune_grid[[1]]
+ntree<-tune_grid[[2]] #using vectors instead of dataframe to subset is faster in for loop
+OOB<-NULL #use to store calculated OOB error estimate
+for(i in 1:nrow(tune_grid)){
+  rf<-randomForest(Loan_Status~. ,newtrain, mtry=mtry[i], ntree=ntree[i])
+  confusion<-rf$confusion
+  temp<-(confusion[2]+confusion[3])/614 #calculate the OOB error estimate
+  OOB<-append(OOB,temp)
+}
+tune_grid$OOB<-OOB
+head(tune_grid[order(tune_grid["OOB"]), ], 4) #order the results 
+
+final_rf<-randomForest(Loan_Status~. ,newtrain, mtry=3, ntree=1000)
+```
+  
+  It seems that the model has the best accuracy for mtry=3 and ntree=500, which is the default parameters. This is exceptable since random forest is known for its high performance even using default parameters.
+
+####Predicting with model
+```{r}
+#rf
+predictions<-unname(predict(final_rf,newtest[]))
+solution<-data.frame(Loan_ID=test[1],Loan_Status=predictions) #predict the test set
+write.csv(solution,"SolutionChecker.csv") #write the predicted result into solution checker file
+```
+
+Finding insights
+---------------------------------------
+  For this section, we will plot the variance importantance plot, partial dependence plots, and simple decision trees to gain insight from the model.
+
+####Variance importance plot  
+```{r,echo=FALSE,fig.height=5,fig.width=5}
+varImpPlot(final_rf)
+```
+  
+  As we had expected, the most significant variables according to the plot is Credit History, following by Total income by loan, Applicant income, Applicant income by loan, and loan amount. Two of the four engineered feature seems to work well, while the other two: NA's number and Zero does not contribute much to the model. Let's check the partial dependence plots for the top six variables.
+  
+####Partial dependence plot
+```{r,echo=FALSE,fig.height=5,fig.width=5}
+op <- par(mfrow=c(3, 2)) 
+partialPlot(final_rf, newtrain, Credit_History,"Y")
+partialPlot(final_rf, newtrain, Income_by_loan,"Y")
+partialPlot(final_rf, newtrain, ApplicantIncome,"Y")
+partialPlot(final_rf, newtrain, ApplicantIncome_by_loan,"Y")
+partialPlot(final_rf, newtrain, LoanAmount,"Y")
+partialPlot(final_rf, newtrain, CoapplicantIncome,"Y")
+```
+  
+  For the partial dependence plot, we care only about trend not the actual value. Some interpretations are as below
+  
+  - Credit history is very significant, those with bad credit history are mostly classified as non approval.
+  
+  - The possibility of approving loan increases as Income by loan amount increases, however the growth stops as it reaches some value around 50(about 1/3 of the training set has Income by loan larger than 50), applicant income itself by loan amount has a similiar trend but not that significant.
+  
+  - The possibility of approving loan decreases as Loan amount increases as it reaches about 100 (about 5/6 of the training set has loan amount larger than 100).
+  
+  - Coapplicant Income and Applicant Income itself are hard to interpret from the plot since they are extremly left skewed, therefore, the trend might be misleading. 
+  
+  
+  
+####Sample decision tree
+```{r,echo=FALSE,fig.height=5,fig.width=5}
+decision_tree<-rpart(newtrain$Loan_Status~. ,newtrain) #make a simple decision tree
+rpart.plot::rpart.plot(decision_tree)
+```
+
+  A simple decision tree coincides with random forest's finding: Credit history and Income by loan is the strongest variable among all, and the plot illustrate how the model works.
+ 
+  
+Conclusion
+---------------------------------------  
+  This is the end of the analysis, we started from data cleaning and processing, missing value imputation with mice package, then exploratory analysis and feature engineering, and finally model building and evaluation. The best accuracy on public test set is 0.805556, ranking 33rd on public score board among about 1000 participants, however, the score on private scoreboard has not released yet. What is more important, we gain some insights about loan approval from our analyis, described below.
+  
+  - Applicants with credit history not passing guidelines mostly fails to get approved, probably because that they have a higher probability of not paying back.
+  
+  - Most of the time, applicants with high income, loaning low amount is more likely to get approved, which makes sense, those applicants are more likely to pay back their loans.
+  
+  - Having a strong coapplicant can be a plus to the probability of getting approve. 
+  
+  - Some basic characteristic such as gender and the status of marriage seems not to be taken into consideration by the company.
