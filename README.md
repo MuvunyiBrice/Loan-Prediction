@@ -2,7 +2,10 @@
 
 ## Project introduction
   Even though this is an Analytics Vidhya competition, my goal in this project is not to compete or to construct the most accurate model but to demonstrate basic skills of tackling cleaned datasets that includes: handling missing values, exploratory analysis, feature engineering, building predictive model, tuning model parameters, and model evaluation, as well as gaining insights from data and model. The goal of this problem is to predict the status of loan approval of test data set as accurate as possible.
-  
+
+## Link to Rpub
+[Loan Prediction](http://rpubs.com/jimmycy93/259572)
+
 ## Problem statement 
 
 About Company
@@ -40,6 +43,3 @@ Company wants to automate the loan eligibility process (real time) based on cust
  
  - Loan_Status : Loan approved (Y/N)
 
-## Link to project
-
-[Loan Prediction](http://rpubs.com/jimmycy93/259572)
